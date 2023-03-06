@@ -1,12 +1,14 @@
 # ================================================================================
-# Author:      Heiko Kromer @ D ONE - 2022
+# Author:      Heiko Kromer @ D ONE - 2023
 # Description: This script contains the preprocessing logic for the windturbines
 #              dataset.
 # ================================================================================
 
 import argparse
+import boto3
 import logging
 import os
+import pathlib
 import sys
 import pandas as pd
 from datetime import datetime, timedelta
@@ -22,29 +24,6 @@ pd.options.mode.chained_assignment = None  # default='warn'
 # --- Constants --- #
 # ----------------- #
 
-# S3 Bucket where the data is stored
-BUCKET_NAME = "aws-sagemaker-blogpost"
-BUCKET = f's3://{BUCKET_NAME}'
-
-# Raw data paths
-RAW_DATA_FOLDER = 'data'
-RAW_DATA_FILE = 'wind_turbines.csv'
-RAW_DATA_PATH = os.path.join(BUCKET, RAW_DATA_FOLDER, RAW_DATA_FILE)
-
-# Path where the processed objects will be stored
-now = datetime.now() # get current time to ensure uniqueness of the output folders
-PROCESSED_DATA_FOLDER = 'processed_' + now.strftime("%Y-%m-%d_%H%M_%S%f")
-PROCESSED_DATA_PATH = os.path.join(BUCKET, PROCESSED_DATA_FOLDER)
-
-# Paths for model train, validation, test split
-# We create one version of the preprocessed files with headers and one without
-# headers. The implementation of XGBoost in AWS does not support headers.
-TRAIN_DATA_PATH = os.path.join(PROCESSED_DATA_PATH, 'train.csv')
-TRAIN_DATA_PATH_W_HEADER = os.path.join(PROCESSED_DATA_PATH, 'train_w_header.csv')
-VALIDATION_DATA_PATH = os.path.join(PROCESSED_DATA_PATH, 'validation.csv')
-TEST_DATA_PATH = os.path.join(PROCESSED_DATA_PATH, 'test.csv')
-TEST_DATA_PATH_W_HEADER = os.path.join(PROCESSED_DATA_PATH, 'test_w_header.csv')
-
 # Constants for preprocessing
 # Error column <> target
 COL_ERRORS = 'subtraction'
@@ -57,9 +36,6 @@ FEATURES = ['wind_speed', 'power', 'nacelle_direction', 'wind_direction',
             'blade_angle_avg', 'hydraulic_pressure']
 # Power values to filter out
 MIN_POWER = 0.049
-
-
-
 
 
 def assert_col_of_df(df: pd.DataFrame, col: Union[List[str], str]) -> None:
@@ -269,17 +245,31 @@ if __name__ == '__main__':
     logger.info(f'Preprocessing job started.')
     # Parse the SDK arguments that are passed when creating the SKlearn container
     parser = argparse.ArgumentParser()
-    parser.add_argument("--n_test_days", type=int, default=10)
-    parser.add_argument("--n_val_days", type=int, default=10)
-    args, _ = parser.parse_known_args()
+    parser.add_argument("--input-data", type=str, required=True)
+    parser.add_argument("--n_test_days", type=int, default=20, required=False)
+    parser.add_argument("--n_val_days", type=int, default=30, required=False)
+    args = parser.parse_args()
 
     logger.info(f"Received arguments {args}.")
 
     # Read in data locally in the container
-    input_data_path = os.path.join("/opt/ml/processing/input", RAW_DATA_FILE)
-    logger.info(f"Reading input data from {input_data_path}")
-    # Read raw input data
-    df = pd.read_csv(input_data_path)
+    base_dir = "/opt/ml/processing"
+    pathlib.Path(f"{base_dir}/data").mkdir(parents=True, exist_ok=True)
+    input_data = args.input_data
+    bucket = input_data.split("/")[2]
+    key = "/".join(input_data.split("/")[3:])
+    
+    logger.info("Downloading data from bucket: %s, key: %s", bucket, key)
+    fn = f"{base_dir}/data/wind_turbines.csv"
+    s3 = boto3.resource("s3")
+    s3.Bucket(bucket).download_file(key, fn)    
+    
+    logger.debug("Reading downloaded data.")
+    df = pd.read_csv(
+        fn,
+    )
+    os.unlink(fn)
+
     logger.info(f"Shape of data is: {df.shape}")
 
     # ---- Preprocess the data set ----
@@ -315,27 +305,15 @@ if __name__ == '__main__':
         features=FEATURES,
         target=COL_ERRORS
     )
-    
-    # Create local output directories. These directories live on the container that is spun up.
-    try:
-        os.makedirs("/opt/ml/processing/train")
-        os.makedirs("/opt/ml/processing/validation")
-        os.makedirs("/opt/ml/processing/test")
-        print("Successfully created directories")
-    except Exception as e:
-        # if the Processing call already creates these directories (or directory otherwise cannot be created)
-        logger.debug(e)
-        logger.debug("Could Not Make Directories.")
-        pass
 
     # Save data locally on the container that is spun up.
     try:
-        pd.DataFrame(train).to_csv("/opt/ml/processing/train/train.csv", header=False, index=False)
-        pd.DataFrame(train).to_csv("/opt/ml/processing/train/train_w_header.csv", header=True, index=False)
-        pd.DataFrame(val).to_csv("/opt/ml/processing/validation/val.csv", header=False, index=False)
-        pd.DataFrame(val).to_csv("/opt/ml/processing/validation/val_w_header.csv", header=True, index=False)
-        pd.DataFrame(test).to_csv("/opt/ml/processing/test/test.csv", header=False, index=False)
-        pd.DataFrame(test).to_csv("/opt/ml/processing/test/test_w_header.csv", header=True, index=False)
+        pd.DataFrame(train).to_csv(f"{base_dir}/train/train.csv", header=False, index=False)
+        pd.DataFrame(train).to_csv(f"{base_dir}/train/train_w_header.csv", header=True, index=False)
+        pd.DataFrame(val).to_csv(f"{base_dir}/validation/val.csv", header=False, index=False)
+        pd.DataFrame(val).to_csv(f"{base_dir}/validation/val_w_header.csv", header=True, index=False)
+        pd.DataFrame(test).to_csv(f"{base_dir}/test/test.csv", header=False, index=False)
+        pd.DataFrame(test).to_csv(f"{base_dir}/test/test_w_header.csv", header=True, index=False)
         logger.info("Files Successfully Written Locally")
     except Exception as e:
         logger.debug("Could Not Write the Files")

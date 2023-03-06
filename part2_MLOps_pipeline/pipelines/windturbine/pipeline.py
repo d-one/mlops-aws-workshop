@@ -22,7 +22,7 @@ from sagemaker.workflow.properties import PropertyFile
 from sagemaker.workflow.step_collections import RegisterModel
 from sagemaker.workflow.steps import ProcessingStep, TrainingStep
 from sagemaker.workflow.functions import Join
-
+from sagemaker.workflow.pipeline_context import PipelineSession
 
 from typing import List
  
@@ -38,26 +38,27 @@ TRAINING_INSTANCE = "ml.m5.xlarge"
 TRANSFORM_INSTANCES = ["ml.m5.xlarge"]
 INFERENCE_INSTANCES = ["ml.t2.medium", "ml.m5.large"]
 
-# S3 Bucket where the data is stored
-BUCKET_NAME = "sagemaker-done-mlops"
-BUCKET = f's3://{BUCKET_NAME}'
+# # S3 Bucket where the data is stored
+# BUCKET_NAME = "sagemaker-d-one-winji-data"
+# BUCKET = f's3://{BUCKET_NAME}'
 
-# Raw data paths
-RAW_DATA_FOLDER = 'data'
-RAW_DATA_FILE = 'wind_turbines.csv'
-RAW_DATA_PATH = os.path.join(BUCKET, RAW_DATA_FOLDER, RAW_DATA_FILE)
+# # Raw data paths
+# RAW_DATA_FOLDER = 'data'
+# RAW_DATA_FILE = 'wind_turbines.csv'
+# RAW_DATA_PATH = os.path.join(BUCKET, RAW_DATA_FOLDER, RAW_DATA_FILE)
+# print(RAW_DATA_PATH)
 
-# Path where the processed objects will be stored
-now = datetime.now() # get current time to ensure uniqueness of the output folders
-PROCESSED_DATA_FOLDER = 'processed_' + now.strftime("%Y-%m-%d_%H%M_%S%f")
-PROCESSED_DATA_PATH = os.path.join(BUCKET, PROCESSED_DATA_FOLDER)
+# # Path where the processed objects will be stored
+# now = datetime.now() # get current time to ensure uniqueness of the output folders
+# PROCESSED_DATA_FOLDER = 'processed_' + now.strftime("%Y-%m-%d_%H%M_%S%f")
+# PROCESSED_DATA_PATH = os.path.join(BUCKET, PROCESSED_DATA_FOLDER)
 
-# Paths for model train, validation, test split
-TRAIN_DATA_PATH = os.path.join(PROCESSED_DATA_PATH, 'train.csv')
-TRAIN_DATA_PATH_W_HEADER = os.path.join(PROCESSED_DATA_PATH, 'train_w_header.csv')
-VALIDATION_DATA_PATH = os.path.join(PROCESSED_DATA_PATH, 'validation.csv')
-TEST_DATA_PATH = os.path.join(PROCESSED_DATA_PATH, 'test.csv')
-TEST_DATA_PATH_W_HEADER = os.path.join(PROCESSED_DATA_PATH, 'test_w_header.csv')
+# # Paths for model train, validation, test split
+# TRAIN_DATA_PATH = os.path.join(PROCESSED_DATA_PATH, 'train.csv')
+# TRAIN_DATA_PATH_W_HEADER = os.path.join(PROCESSED_DATA_PATH, 'train_w_header.csv')
+# VALIDATION_DATA_PATH = os.path.join(PROCESSED_DATA_PATH, 'validation.csv')
+# TEST_DATA_PATH = os.path.join(PROCESSED_DATA_PATH, 'test.csv')
+# TEST_DATA_PATH_W_HEADER = os.path.join(PROCESSED_DATA_PATH, 'test_w_header.csv')
 
 
 # Model package group name
@@ -109,6 +110,27 @@ def get_session(region, default_bucket):
         sagemaker_runtime_client=runtime_client,
         default_bucket=default_bucket,
     )
+
+def get_pipeline_session(region, default_bucket):
+    """Gets the pipeline session based on the region.
+
+    Args:
+        region: the aws region to start the session
+        default_bucket: the bucket to use for storing the artifacts
+
+    Returns:
+        PipelineSession instance
+    """
+
+    boto_session = boto3.Session(region_name=region)
+    sagemaker_client = boto_session.client("sagemaker")
+
+    return PipelineSession(
+        boto_session=boto_session,
+        sagemaker_client=sagemaker_client,
+        default_bucket=default_bucket,
+    )
+
 
 
 def get_sagemaker_client(region):
@@ -203,6 +225,7 @@ def get_pipeline(
     if role is None:
         role = sagemaker.session.get_execution_role(sagemaker_session)
     
+    pipeline_session = get_pipeline_session(region, default_bucket)
     # Print the role for debugging
     print(f"SageMaker assumes role: {role}.")
         
@@ -212,53 +235,35 @@ def get_pipeline(
     )
     input_data = ParameterString(
         name="InputDataUrl",
-        default_value=RAW_DATA_PATH,  
+        default_value="s3://sagemaker-d-one-winji-data/data/wind_turbines.csv"
     )
 
-    # Processing step for feature engineering
+    # processing step for feature engineering
     sklearn_processor = SKLearnProcessor(
         framework_version="0.23-1",
         instance_type=training_instance,
         instance_count=1,
-        base_job_name=f"{base_job_prefix}-{preprocessor_job_name}",  
-        sagemaker_session=sagemaker_session,
+        base_job_name=f"{base_job_prefix}-{preprocessor_job_name}",
+        sagemaker_session=pipeline_session,
         role=role,
+    )
+    step_args = sklearn_processor.run(
+        outputs=[
+            ProcessingOutput(output_name="train", source="/opt/ml/processing/train"),
+            ProcessingOutput(output_name="validation", source="/opt/ml/processing/validation"),
+            ProcessingOutput(output_name="test", source="/opt/ml/processing/test"),
+        ],
+        code=os.path.join(BASE_DIR, "preprocess.py"),
+        arguments=["--input-data", input_data],
     )
     step_process = ProcessingStep(
         name=processing_step_name,
-        processor=sklearn_processor,
-        inputs=[
-            ProcessingInput(
-                source=RAW_DATA_PATH,
-                destination="/opt/ml/processing/input"
-            )
-        ],
-        outputs=[
-            ProcessingOutput(
-                output_name="train",
-                destination=PROCESSED_DATA_PATH,
-                source="/opt/ml/processing/train"
-            ),
-            ProcessingOutput(
-                output_name="validation",
-                destination=PROCESSED_DATA_PATH,
-                source="/opt/ml/processing/validation"
-            ),
-            ProcessingOutput(
-                output_name="test",
-                destination=PROCESSED_DATA_PATH,
-                source='/opt/ml/processing/test'
-            ),
-        ],
-        code=os.path.join(BASE_DIR, "preprocess.py"),
-        job_arguments=[
-            "--n_test_days", "20",
-            "--n_val_days", "30"
-        ],
+        step_args=step_args,
     )
+    
 
     # Training step for generating model artifacts
-    model_path = f"s3://{sagemaker_session.default_bucket()}/{base_job_prefix}/AbaloneTrain"
+    model_path = f"s3://{sagemaker_session.default_bucket()}/{base_job_prefix}/WindTurbine"
     # Retrieving the pre-configured AWS Sagemaker xgboost algorithm
     image_uri = sagemaker.image_uris.retrieve(
         framework="xgboost",  
@@ -273,7 +278,7 @@ def get_pipeline(
         instance_count=1,
         output_path=model_path,
         base_job_name=f"{base_job_prefix}-{training_job_name}",
-        sagemaker_session=sagemaker_session,
+        sagemaker_session=pipeline_session,
         role=role,
     )
     xgboost_model.set_hyperparameters(
@@ -312,7 +317,7 @@ def get_pipeline(
         instance_type=processing_instance,
         instance_count=1,
         base_job_name=f"{base_job_prefix}-{evaluation_job_name}",
-        sagemaker_session=sagemaker_session,
+        sagemaker_session=pipeline_session,
         role=role,
     )
     evaluation_report = PropertyFile(
@@ -338,7 +343,7 @@ def get_pipeline(
         outputs=[
             ProcessingOutput(
                 output_name="evaluation",
-                destination=PROCESSED_DATA_PATH,
+                destination="/opt/ml/processing/evaluation",
                 source="/opt/ml/processing/evaluation"
             ),
         ],
@@ -405,6 +410,6 @@ def get_pipeline(
             step_eval,
             step_cond,
         ],
-        sagemaker_session=sagemaker_session,
+        sagemaker_session=pipeline_session,
     )
     return pipeline
