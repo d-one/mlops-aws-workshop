@@ -38,29 +38,6 @@ TRAINING_INSTANCE = "ml.m5.xlarge"
 TRANSFORM_INSTANCES = ["ml.m5.xlarge"]
 INFERENCE_INSTANCES = ["ml.t2.medium", "ml.m5.large"]
 
-# # S3 Bucket where the data is stored
-# BUCKET_NAME = "sagemaker-d-one-winji-data"
-# BUCKET = f's3://{BUCKET_NAME}'
-
-# # Raw data paths
-# RAW_DATA_FOLDER = 'data'
-# RAW_DATA_FILE = 'wind_turbines.csv'
-# RAW_DATA_PATH = os.path.join(BUCKET, RAW_DATA_FOLDER, RAW_DATA_FILE)
-# print(RAW_DATA_PATH)
-
-# # Path where the processed objects will be stored
-# now = datetime.now() # get current time to ensure uniqueness of the output folders
-# PROCESSED_DATA_FOLDER = 'processed_' + now.strftime("%Y-%m-%d_%H%M_%S%f")
-# PROCESSED_DATA_PATH = os.path.join(BUCKET, PROCESSED_DATA_FOLDER)
-
-# # Paths for model train, validation, test split
-# TRAIN_DATA_PATH = os.path.join(PROCESSED_DATA_PATH, 'train.csv')
-# TRAIN_DATA_PATH_W_HEADER = os.path.join(PROCESSED_DATA_PATH, 'train_w_header.csv')
-# VALIDATION_DATA_PATH = os.path.join(PROCESSED_DATA_PATH, 'validation.csv')
-# TEST_DATA_PATH = os.path.join(PROCESSED_DATA_PATH, 'test.csv')
-# TEST_DATA_PATH_W_HEADER = os.path.join(PROCESSED_DATA_PATH, 'test_w_header.csv')
-
-
 # Model package group name
 MODEL_PACKAGE_GROUP_NAME = "WindTurbinePackageGroup"
 # Pipeline name
@@ -226,6 +203,7 @@ def get_pipeline(
         role = sagemaker.session.get_execution_role(sagemaker_session)
     
     pipeline_session = get_pipeline_session(region, default_bucket)
+
     # Print the role for debugging
     print(f"SageMaker assumes role: {role}.")
         
@@ -237,8 +215,10 @@ def get_pipeline(
         name="InputDataUrl",
         default_value="s3://sagemaker-d-one-winji-data/data/wind_turbines.csv"
     )
-
-    # processing step for feature engineering
+    
+    # --------------------------------------------------------------------------------------
+    # Preprocessing step for feature engineering
+    # --------------------------------------------------------------------------------------
     sklearn_processor = SKLearnProcessor(
         framework_version="0.23-1",
         instance_type=training_instance,
@@ -257,14 +237,15 @@ def get_pipeline(
         arguments=["--input-data", input_data],
     )
     step_process = ProcessingStep(
-        name=processing_step_name,
+        name='WindTurbineErrorPreprocessing',  # You could change the name here!
         step_args=step_args,
     )
     
-
+    # --------------------------------------------------------------------------------------
     # Training step for generating model artifacts
+    # --------------------------------------------------------------------------------------
     model_path = f"s3://{sagemaker_session.default_bucket()}/{base_job_prefix}/WindTurbine"
-    # Retrieving the pre-configured AWS Sagemaker xgboost algorithm
+    
     image_uri = sagemaker.image_uris.retrieve(
         framework="xgboost",  
         region=region,
@@ -292,7 +273,7 @@ def get_pipeline(
         silent=0,
     )
     step_train = TrainingStep(
-        name=training_step_name,
+        name='WindTurbineErrorTraining',  # You could change the name here!
         estimator=xgboost_model,
         inputs={
             "train": TrainingInput(
@@ -310,7 +291,9 @@ def get_pipeline(
         },
     )
 
+    # --------------------------------------------------------------------------------------
     # Processing step for evaluation
+    # --------------------------------------------------------------------------------------
     script_eval = ScriptProcessor(
         image_uri=image_uri,
         command=["python3"],
@@ -326,7 +309,7 @@ def get_pipeline(
         path="evaluation.json",
     )
     step_eval = ProcessingStep(
-        name=evaluation_step_name,
+        name='WindTurbineErrorEvaluation',  # You could change the name here!
         processor=script_eval,
         inputs=[
             ProcessingInput(
@@ -351,7 +334,9 @@ def get_pipeline(
         property_files=[evaluation_report],
     )
 
+    # --------------------------------------------------------------------------------------
     # Register model step that will be conditionally executed
+    # --------------------------------------------------------------------------------------
     model_metrics = ModelMetrics(
         model_statistics=MetricsSource(
             s3_uri="{}/evaluation.json".format(
@@ -360,10 +345,8 @@ def get_pipeline(
             content_type="application/json",
         )
     )
-
-    # Register model step that will be conditionally executed
     step_register = RegisterModel(
-        name=register_model_step_name,
+        name='WindTurbineErrorRegisterModel',  # You could change the name here!
         estimator=xgboost_model,
         model_data=step_train.properties.ModelArtifacts.S3ModelArtifacts,
         content_types=["text/csv"],
@@ -375,7 +358,9 @@ def get_pipeline(
         model_metrics=model_metrics,
     )
     
+    # --------------------------------------------------------------------------------------
     # Conditional step for evaluating model quality and branching execution
+    # --------------------------------------------------------------------------------------
     cond_lte = ConditionGreaterThan(
         left=JsonGet(
             step=step_eval,
@@ -386,12 +371,12 @@ def get_pipeline(
     )
 
     step_fail = FailStep(
-        name=fail_step_name,
+        name='WindTurbineErrorFail',  # You could change the name here!
         error_message=Join(on=" ", values=["Execution failed due to accuracy <", accuracy_value]),
     )
 
     step_cond = ConditionStep(
-        name=condition_step_name,
+        name='WindTurbineErrorAccuracyCondition',  # You could change the name here!
         conditions=[cond_lte],
         if_steps=[step_register],
         else_steps=[step_fail],
